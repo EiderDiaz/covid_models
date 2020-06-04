@@ -1,0 +1,183 @@
+---
+title: "covid_models_benchmark"
+author: "eider"
+date: "6/3/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(reshape2)
+library(glmnet)
+library(Metrics)
+library(caret)
+
+```
+
+
+```{r}
+coronavirus <- read_csv(url("https://raw.githubusercontent.com/RamiKrispin/coronavirus-csv/master/coronavirus_dataset.csv"))
+
+glimpse(coronavirus)
+
+```
+
+
+#subset and summarise the dataset to get the 
+```{r}
+ 
+# "confirmed" 
+confirmed_cases_worldwide_2 <- coronavirus %>%
+  group_by(Country.Region,date) %>%
+  filter(type=="confirmed", Country.Region=="Mexico") %>% 
+  #filter(Country.Region %in% confirmed_500cases$Country.Region) %>%
+  summarise(confirmed_cases = sum(cases)) %>%
+  mutate(cum_conf= cumsum(confirmed_cases)) %>%
+  as.data.frame()
+  
+
+#"recovered"  
+recovered_cases_worldwide_2 <- coronavirus %>%
+  group_by(Country.Region,date) %>%
+  filter(type=="recovered", Country.Region=="Mexico") %>% 
+  #filter(Country.Region %in% confirmed_500cases$Country.Region) %>%
+  summarise(recovered_cases = sum(cases)) %>%
+  mutate(cum_rec= cumsum(recovered_cases)) %>%
+  as.data.frame()
+
+
+death_cases_worldwide_2 <- coronavirus %>%
+  group_by(Country.Region,date) %>%
+  filter(type=="death" , Country.Region=="Mexico") %>% 
+  #filter(Country.Region %in% confirmed_500cases$Country.Region) %>%
+  summarise(death_cases = sum(cases))%>%
+  mutate(cum_death= cumsum(death_cases)) %>%
+  as.data.frame()
+
+
+#######################HERE I SUGGEST TO COMBINE THE COEF DATA WITH THE DATA ALL THE REMAINING CHUNKS SHOULD RUN WITH NO PROBLEMS 
+
+#combine the cols
+mexico_data <- cbind(confirmed_cases_worldwide_2,
+                                recovered_cases = recovered_cases_worldwide_2$recovered_cases,
+                                cum_rec = recovered_cases_worldwide_2$cum_rec,
+                                death_cases= death_cases_worldwide_2$death_cases,                                              cum_death= death_cases_worldwide_2$cum_death  )
+
+
+#policies 0 1 2 as suggested by homar 
+mexico_data$policy<- rep(0,nrow(mexico_data))
+
+
+index1 <- mexico_data$date > "2020-03-22"
+mexico_data$policy[index1] <- 1   
+#
+index2 <- mexico_data$date > "2020-03-30"
+mexico_data$policy[index2] <- 2  
+#
+index1.1 <- mexico_data$date > "2020-05-30"
+mexico_data$policy[index1.1] <- 1  
+
+```
+
+
+#split the dataset
+```{r}
+#this line of code sample randomly 75 of the dataset and is used to subset the train and test data
+#but if is randomly pick to generate a prediction it is correct?
+#its better a subset like 1:84 observations from train and the rest to test?
+
+#tranSet <- sample(nrow(mexico_data),0.75*nrow(mexico_data)) 
+
+Train <- mexico_data[(1:84),]
+Test <- mexico_data[-(1:84),]
+#HEEEEEEEEEEEEEEEEEEERE ALSO CHANGE THE VARIABLE TO THE ONE WE ACTUALLY WANT TO PREDICT
+y_train<- Train$confirmed_cases
+y_test <- Test$confirmed_cases
+
+#HEEEEEEEEEEEEEEEEEEEEEEEEERE ALSO SELECT THE FEATURES THAT ACTUALLY WE WANT ;)
+x_train<- select(Train,-c(confirmed_cases,date,Country.Region) ) %>% as.matrix()
+x_test <- select(Test,-c(confirmed_cases,date,Country.Region)) %>% as.matrix()
+```
+
+```{r}
+
+#se crea un grid de lambas para hacer la busqueda de los hp adecuados
+lambdas <- 10^seq(3, -2, by = -.1)
+
+cv_fit <- cv.glmnet(x_train, y_train, alpha = 1, lambda = lambdas)
+
+#visualize the cv fit of the lasso regression
+plot(cv_fit)
+opt_lambda <- cv_fit$lambda.min
+opt_lambda # this optiman lambda minimize the error
+#fit <- cv_fit$glmnet.fit
+#summary(fit)
+
+######################
+y_predicted <- predict(cv_fit, s = opt_lambda, newx = x_test)
+
+
+```
+
+
+```{r}
+#i create a new var with the y train + y pred (it will only be display the predicted values)
+mexico_data$pred_vals <- c(y_train,as.vector(y_predicted))
+
+ggplot(mexico_data,aes(x=date)) +
+  geom_line(aes(y=pred_vals),col="red") +
+  geom_line(aes(y=confirmed_cases)) + #change this to the variable of interest 
+  geom_vline(xintercept = mexico_data$date[nrow(x_train)], color="red", 
+                 linetype="dashed")+
+  ylab("Cumulative death cases in México")+
+  ggtitle("LASSO regression using confirmed_cases as Y")
+
+#metrics
+mae(actual =y_test ,predicted = y_predicted) 
+mse(actual =y_test ,predicted = y_predicted)
+```
+
+#ridge regression
+```{r}
+cv_fit <- cv.glmnet(x_train, y_train, alpha = 0, lambda = lambdas)
+#visualize the cv fit of the lasso regression
+plot(cv_fit)
+opt_lambda <- cv_fit$lambda.min
+opt_lambda # this optiman lambda minimize the error
+#fit <- cv_fit$glmnet.fit
+#summary(fit)
+
+######################
+y_predicted <- predict(cv_fit, s = opt_lambda, newx = x_test)
+
+head(y_predicted)
+
+
+```
+
+
+# plot the results
+```{r}
+#i create a new var with the y train + y pred (it will only be display the predicted values)
+mexico_data$pred_vals <- c(y_train,as.vector(y_predicted))
+
+ggplot(mexico_data,aes(x=date)) +
+  geom_line(aes(y=pred_vals),col="red") +
+  geom_line(aes(y=confirmed_cases)) + #change this to the variable of interest 
+  geom_vline(xintercept = mexico_data$date[nrow(x_train)], color="red", 
+                 linetype="dashed")+
+  ylab("Cumulative death cases in México")+
+  ggtitle("RIDGE regression using confirmed_cases as Y")
+  
+
+
+#metrics
+mae(actual =y_test ,predicted = y_predicted) 
+mse(actual =y_test ,predicted = y_predicted)
+```
+
