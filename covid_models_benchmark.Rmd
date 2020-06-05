@@ -4,10 +4,10 @@ author: "eider"
 date: "6/3/2020"
 output: html_document
 editor_options: 
-  chunk_output_type: console
+chunk_output_type: console
 ---
 
-
+# instantiate libraries
 ```{r}
 library(dplyr)
 library(readr)
@@ -16,74 +16,222 @@ library(reshape2)
 library(glmnet)
 library(Metrics)
 library(caret)
-
+library(magrittr)
+library(tidyverse)
+library(lubridate)
 ```
 
-
+# set datasources from JHU
 ```{r}
-coronavirus <- read_csv(url("https://raw.githubusercontent.com/RamiKrispin/coronavirus-csv/master/coronavirus_dataset.csv"))
+# coronavirus <- read_csv(url("https://raw.githubusercontent.com/RamiKrispin/coronavirus-csv/master/coronavirus_dataset.csv"))
 
-glimpse(coronavirus)
+# Dataset from Johns Hopkins - Center for Systems Science and Engineering (CSSEGISandData)
+# CSSE at Johns Hopkins University
+# Baltimore, MD https://systems.jhu.edu/
 
+jhu_url_confirmed <- paste("https://raw.githubusercontent.com/CSSEGISandData/", 
+                 "COVID-19/master/csse_covid_19_data/", "csse_covid_19_time_series/", 
+                 "time_series_covid19_confirmed_global.csv", sep = "")
+
+jhu_url_deaths <- paste("https://raw.githubusercontent.com/CSSEGISandData/", 
+                 "COVID-19/master/csse_covid_19_data/", "csse_covid_19_time_series/", 
+                 "time_series_covid19_deaths_global.csv", sep = "")
+
+jhu_url_recovered <- paste("https://raw.githubusercontent.com/CSSEGISandData/", 
+                 "COVID-19/master/csse_covid_19_data/", "csse_covid_19_time_series/", 
+                 "time_series_covid19_recovered_global.csv", sep = "")
+
+# glimpse(coronavirus)
 ```
 
-
-#subset and summarise the dataset to get the 
+# get data from JHU
 ```{r}
  
 # "confirmed" 
-confirmed_cases_worldwide_2 <- coronavirus %>%
-  group_by(Country.Region,date) %>%
-  filter(type=="confirmed", Country.Region=="Mexico") %>% 
-  #filter(Country.Region %in% confirmed_500cases$Country.Region) %>%
-  summarise(confirmed_cases = sum(cases)) %>%
-  mutate(cum_conf= cumsum(confirmed_cases)) %>%
+#confirmed_cases_worldwide_2 <- coronavirus %>%
+#  group_by(Country.Region,date) %>%
+#  filter(type=="confirmed", Country.Region=="Mexico") %>% 
+#  #filter(Country.Region %in% confirmed_500cases$Country.Region) %>%
+#  summarise(confirmed_cases = sum(cases)) %>%
+#  mutate(cum_conf= cumsum(confirmed_cases)) %>%
+#  as.data.frame()
+
+# Dataset for confirmed cases for Mexico since first case
+confirmed_long_jhu <- read_csv(jhu_url_confirmed) %>% 
+  rename(province = "Province/State", country_region = "Country/Region") %>% 
+  pivot_longer(-c(province, country_region, Lat, Long), names_to = "Date", values_to = "cumulative_cases") %>%
+  mutate(Date = mdy(Date) - days(1)) %>% 
+  filter(country_region == "Mexico") %>% 
+  filter(Date >= "2020-02-27") %>%
+  arrange(Date) %>%
+  mutate(cases = c(0, diff(cumulative_cases))) %>%
+  ungroup() %>%
+  select(-c(province, country_region, Lat, Long)) %>%
   as.data.frame()
-  
 
 #"recovered"  
-recovered_cases_worldwide_2 <- coronavirus %>%
-  group_by(Country.Region,date) %>%
-  filter(type=="recovered", Country.Region=="Mexico") %>% 
-  #filter(Country.Region %in% confirmed_500cases$Country.Region) %>%
-  summarise(recovered_cases = sum(cases)) %>%
-  mutate(cum_rec= cumsum(recovered_cases)) %>%
+# recovered_cases_worldwide_2 <- coronavirus %>%
+#  group_by(Country.Region,date) %>%
+#  filter(type=="recovered", Country.Region=="Mexico") %>% 
+#  #filter(Country.Region %in% confirmed_500cases$Country.Region) %>%
+#  summarise(recovered_cases = sum(cases)) %>%
+#  mutate(cum_rec= cumsum(recovered_cases)) %>%
+#  as.data.frame()
+recovered_long_jhu <- read_csv(jhu_url_recovered) %>% 
+  rename(province = "Province/State", country_region = "Country/Region") %>% 
+  pivot_longer(-c(province, country_region, Lat, Long), names_to = "Date", values_to = "cumulative_recovered") %>%
+  mutate(Date = mdy(Date) - days(1)) %>% 
+  filter(country_region == "Mexico") %>% 
+  filter(Date >= "2020-02-27") %>%
+  arrange(Date) %>%
+  mutate(recovered = c(0, diff(cumulative_recovered))) %>%
+  ungroup() %>%
+  select(-c(province, country_region, Lat, Long)) %>%
   as.data.frame()
 
-
-death_cases_worldwide_2 <- coronavirus %>%
-  group_by(Country.Region,date) %>%
-  filter(type=="death" , Country.Region=="Mexico") %>% 
-  #filter(Country.Region %in% confirmed_500cases$Country.Region) %>%
-  summarise(death_cases = sum(cases))%>%
-  mutate(cum_death= cumsum(death_cases)) %>%
+#"deaths"
+# death_cases_worldwide_2 <- coronavirus %>%
+#  group_by(Country.Region,date) %>%
+#  filter(type=="death" , Country.Region=="Mexico") %>% 
+#  #filter(Country.Region %in% confirmed_500cases$Country.Region) %>%
+#  summarise(death_cases = sum(cases))%>%
+#  mutate(cum_death= cumsum(death_cases)) %>%
+#  as.data.frame()
+deaths_long_jhu <- read_csv(jhu_url_deaths) %>% 
+  rename(province = "Province/State", country_region = "Country/Region") %>% 
+  pivot_longer(-c(province, country_region, Lat, Long), names_to = "Date", values_to = "cumulative_deaths") %>%
+  mutate(Date = mdy(Date) - days(1)) %>% 
+  filter(country_region == "Mexico") %>% 
+  filter(Date >= "2020-02-27") %>%
+  arrange(Date) %>%
+  mutate(deaths = c(0, diff(cumulative_deaths))) %>%
+  ungroup() %>%
+  select(-c(province, country_region, Lat, Long)) %>%
   as.data.frame()
+```
 
+# estimate R0
+```{r}
+# R0 automatic estimator
+dataset <- confirmed_long_jhu %>%
+  mutate(day=1:n()) %>% select(day,cases)
 
+# Solver
+sir_1 <- function(beta, gamma, S0, I0, R0, times) {
+  require(deSolve) # for the "ode" function
+  
+  # the differential equations:
+  sir_equations <- function(time, variables, parameters) {
+    with(as.list(c(variables, parameters)), {
+      dS <- -beta * I * S
+      dI <-  beta * I * S - gamma * I
+      dR <-  gamma * I
+      return(list(c(dS, dI, dR)))
+    })
+  }
+  
+  # the parameters values:
+  parameters_values <- c(beta  = beta, gamma = gamma)
+  
+  # the initial values of variables:
+  initial_values <- c(S = S0, I = I0, R = R0)
+  
+  # solving
+  out <- ode(initial_values, times, sir_equations, parameters_values)
+  
+  # returning the output:
+  as.data.frame(out)
+}
+
+# Mexico's population based on https://datos.gob.mx/busca/dataset/proyecciones-de-la-poblacion-de-mexico-y-de-las-entidades-federativas-2016-2050
+population <- 127792286 
+N = population * 0.1
+
+# Maximum likelihood estimation with the bbmle package
+mLL <- function(beta, gamma, sigma, day, cases, N = population * 0.1) {
+  beta <- exp(beta) # to make sure that the parameters are positive
+  gamma <- exp(gamma)
+  sigma <- exp(sigma)
+  I0 <- cases[1] # initial number of infectious
+  observations <- cases[-1] # the fit is done on the other data points
+  predictions <- sir_1(beta = beta, gamma = gamma,
+                       S0 = N - I0, I0 = I0, R0 = 0, times = day)
+  predictions <- predictions$I[-1] # removing the first point too
+  # returning minus log-likelihood:
+  -sum(dnorm(x = observations, mean = predictions, sd = sigma, log = TRUE))
+}
+
+library(bbmle) # for "mle2", "coef", "confint", "vcov", "logLik", "profile", "summary", "plot.profile.mle2"
+
+# From Literature https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3546051
+# Between 0.01 and 0.1 of total population infected
+# gamma = 0.0602
+
+# From Literature: https://www.sciencedirect.com/science/article/pii/S2590053620300410
+# R0 from 1.4 to 3.58
+# We take worst scenario to begin modelling, 3.58
+# So R0 = N * (beta / gamma) -> 3.58 = (12779228.6) * (beta / 0.0602) then beta = 0.000000016864555
+
+dataset$beta <- c(0.000000016864555)
+dataset$gamma <- c(0.0602)
+dataset$R0 <- c(3.58)
+
+starting_param_val <- list(beta = 0.000000016864555, gamma = 0.0602, sigma = 1)
+
+for (i in 2:nrow(dataset)) {
+  dataset_buffer <- head(dataset[c("day", "cases")], i)
+  estimates <- mle2(minuslogl = mLL, start = lapply(starting_param_val, log),
+                             method = "Nelder-Mead", data = c(dataset_buffer, N = population * 0.1))
+  beta <- exp(summary(estimates)@coef[1])
+  gamma <- exp(summary(estimates)@coef[2])
+  R0 = N * (beta/gamma)
+  dataset$beta[i] <- beta
+  dataset$gamma[i] <- gamma
+  dataset$R0[i] <- R0
+}
+```
+
+# enable dataset
+```{r}
 #######################HERE I SUGGEST TO COMBINE THE COEF DATA WITH THE DATA ALL THE REMAINING CHUNKS SHOULD RUN WITH NO PROBLEMS 
 
 #combine the cols
-mexico_data <- cbind(confirmed_cases_worldwide_2,
-                                recovered_cases = recovered_cases_worldwide_2$recovered_cases,
-                                cum_rec = recovered_cases_worldwide_2$cum_rec,
-                                death_cases= death_cases_worldwide_2$death_cases,                                              cum_death= death_cases_worldwide_2$cum_death  )
+mexico_data <- cbind(confirmed_long_jhu,
+                                cumulative_recovered = recovered_long_jhu$cumulative_recovered,
+                                recovered = recovered_long_jhu$recovered,
+                                cumulative_deaths = deaths_long_jhu$cumulative_deaths,
+                                deaths = deaths_long_jhu$deaths,
+                                beta =dataset$beta,
+                                gamma = dataset$gamma,
+                                R0 = dataset$R0)
 
-
-#policies 0 1 2 as suggested by homar 
+# policies 0 1 2 as suggested by homar, 0 is for mild (informative) protective measures, 1 is for social distancing measures ("Susana Distancia") and 2 is strong measures (volutary isolation) 
+# Based on dates given by Government of Mexico
 mexico_data$policy<- rep(0,nrow(mexico_data))
 
-
-index1 <- mexico_data$date > "2020-03-22"
+index1 <- mexico_data$Date > "2020-03-22"
 mexico_data$policy[index1] <- 1   
 #
-index2 <- mexico_data$date > "2020-03-30"
+index2 <- mexico_data$Date > "2020-03-31"
 mexico_data$policy[index2] <- 2  
 #
-index1.1 <- mexico_data$date > "2020-05-30"
+index1.1 <- mexico_data$Date > "2020-05-31"
 mexico_data$policy[index1.1] <- 1  
 
+mexico_data$predicted_cases_lasso <- rep(NA,nrow(mexico_data))
+
+mexico_data$mae_lasso <- rep(NA,nrow(mexico_data))
+
+mexico_data$mse_lasso <- rep(NA,nrow(mexico_data))
+
+mexico_data$predicted_cases_ridge <- rep(NA,nrow(mexico_data))
+
+mexico_data$mae_ridge <- rep(NA,nrow(mexico_data))
+
+mexico_data$mse_ridge <- rep(NA,nrow(mexico_data))
 ```
 
+View(mexico_data)
 
 #split the dataset
 ```{r}
@@ -93,91 +241,186 @@ mexico_data$policy[index1.1] <- 1
 
 #tranSet <- sample(nrow(mexico_data),0.75*nrow(mexico_data)) 
 
-Train <- mexico_data[(1:84),]
-Test <- mexico_data[-(1:84),]
+lambdas <- 10^seq(3, -2, by = -.1)
+
+for (i in 4:(nrow(mexico_data)-4)) {
+    Train <- mexico_data[(1:i-1),]
+    Test <- mexico_data[(i:(i+4)),]
+    y_train <- Train$cases
+    y_test <- Test$cases
+    x_train<- select(Train,-c(cases,Date,predicted_cases_lasso,mae_lasso,mse_lasso,predicted_cases_ridge,mae_ridge,mse_ridge)) %>% as.matrix()
+    x_test <- select(Test,-c(cases,Date,predicted_cases_lasso,mae_lasso,mse_lasso,predicted_cases_ridge,mae_ridge,mse_ridge)) %>% as.matrix()
+    # predict lasso
+    cv_fit_lasso <- cv.glmnet(x_train, y_train, alpha = 1, lambda = lambdas)
+    png(filename=paste("./img_lasso/hiperparameters_day_",i,".png",sep=''))
+    plot(cv_fit_lasso)
+    dev.off()
+    plot(cv_fit_lasso)
+    opt_lambda_lasso <- cv_fit$lambda.min
+    opt_lambda_lasso
+    y_predicted_lasso <- predict(cv_fit_lasso, s = opt_lambda_lasso, newx = x_test)
+    if (i == 4) {
+      mexico_data$predicted_cases_lasso[1] <- y_train[1]
+      mexico_data$predicted_cases_lasso[2] <- y_train[2]
+      mexico_data$predicted_cases_lasso[3] <- y_train[3]
+    }
+    # mexico_data$predicted_cases <- c(y_train,as.vector(y_predicted),rep(NA,nrow(mexico_data)-length(c(y_train,as.vector(y_predicted)))))
+    mexico_data$predicted_cases_lasso[i] <- abs(round(c(as.vector(y_predicted_lasso))[1],0))
+    mexico_data$predicted_cases_lasso[i+1] <- abs(round(c(as.vector(y_predicted_lasso))[2],0))
+    mexico_data$predicted_cases_lasso[i+2] <- abs(round(c(as.vector(y_predicted_lasso))[3],0))
+    mexico_data$predicted_cases_lasso[i+3] <- abs(round(c(as.vector(y_predicted_lasso))[4],0))
+    mexico_data$predicted_cases_lasso[i+4] <- abs(round(c(as.vector(y_predicted_lasso))[5],0))
+    
+    # plot results lasso
+    subset_mexico <- head(mexico_data,(i+4))
+    plot_lasso <- ggplot(subset_mexico,aes(x=Date)) +
+    geom_line(aes(y=predicted_cases_lasso, colour = "Predicted infected cases")) +
+    geom_line(aes(y=cases, colour = "Real infected cases")) + #change this to the variable of interest 
+    scale_colour_manual("", 
+                      breaks = c("Predicted infected cases", "Real infected cases"),
+                      values = c("red", "blue")) +
+    geom_vline(xintercept = mexico_data$Date[nrow(x_train)], col="red", 
+                 linetype="dashed") +
+    ylab("Infected confirmed cases in México") +
+    ggtitle(paste("LASSO regression | Prediction of next 5 days horizon, after first", i, "days after first case outbreak"))
+    ggsave(plot_lasso, file=paste("./img_lasso/predictions_day_",i,".png", sep=''), scale = .5)
+    print(plot_lasso)
+    
+    # collect errors lasso
+    errormae_lasso <- mae(actual = y_test ,predicted = abs(round(y_predicted_lasso,0)))
+    errormse_lasso <- mse(actual = y_test ,predicted = abs(round(y_predicted_lasso,0)))
+    mexico_data$mae_lasso[i] <- errormae_lasso
+    mexico_data$mse_lasso[i] <- errormse_lasso
+    
+    # predict ridge
+    cv_fit_ridge <- cv.glmnet(x_train, y_train, alpha = 0, lambda = lambdas)
+    #visualize the cv fit of the lasso regression
+    png(filename=paste("./img_ridge/hiperparameters_day_",i,".png",sep=''))
+    plot(cv_fit_ridge)
+    dev.off()
+    plot(cv_fit_ridge)
+    opt_lambda_ridge <- cv_fit$lambda.min
+    opt_lambda_ridge
+    y_predicted_ridge <- predict(cv_fit_ridge, s = opt_lambda_ridge, newx = x_test)
+    if (i == 4) {
+    mexico_data$predicted_cases_ridge[1] <- y_train[1]
+    mexico_data$predicted_cases_ridge[2] <- y_train[2]
+    mexico_data$predicted_cases_ridge[3] <- y_train[3]
+    }
+    # mexico_data$predicted_cases <- c(y_train,as.vector(y_predicted),rep(NA,nrow(mexico_data)-length(c(y_train,as.vector(y_predicted)))))
+    mexico_data$predicted_cases_ridge[i] <- abs(round(c(as.vector(y_predicted_ridge))[1],0))
+    mexico_data$predicted_cases_ridge[i+1] <- abs(round(c(as.vector(y_predicted_ridge))[2],0))
+    mexico_data$predicted_cases_ridge[i+2] <- abs(round(c(as.vector(y_predicted_ridge))[3],0))
+    mexico_data$predicted_cases_ridge[i+3] <- abs(round(c(as.vector(y_predicted_ridge))[4],0))
+    mexico_data$predicted_cases_ridge[i+4] <- abs(round(c(as.vector(y_predicted_ridge))[5],0))
+    
+    # plot results ridge
+    plot_ridge <- ggplot(subset_mexico,aes(x=Date)) +
+    geom_line(aes(y=predicted_cases_ridge, colour = "Predicted infected cases")) +
+    geom_line(aes(y=cases, colour = "Real infected cases")) + #change this to the variable of interest 
+    scale_colour_manual("", 
+                      breaks = c("Predicted infected cases", "Real infected cases"),
+                      values = c("red", "blue")) +
+    geom_vline(xintercept = mexico_data$Date[nrow(x_train)], col="red", 
+                 linetype="dashed") +
+    ylab("Infected confirmed cases in México") +
+    ggtitle(paste("RIDGE regression | Prediction of next 5 days horizon, after first", i, "days after first case outbreak"))
+    ggsave(plot_ridge, file=paste("./img_ridge/predictions_day_",i,".png", sep=''), scale = .5)
+    print(plot_ridge)
+    
+    # collect errors lasso
+    errormae_ridge <- mae(actual = y_test ,predicted = abs(round(y_predicted_ridge,0))) 
+    errormse_ridge <- mse(actual = y_test ,predicted = abs(round(y_predicted_ridge,0)))
+    mexico_data$mae_ridge[i] <- errormae_ridge
+    mexico_data$mse_ridge[i] <- errormse_ridge
+}
+
+View(mexico_data)
+
+# log(opt_lambda)
+# log(cv_fit$lambda.1se)
+#Train <- mexico_data[(1:84),]
+#Test <- mexico_data[-(1:84),]
 #HEEEEEEEEEEEEEEEEEEERE ALSO CHANGE THE VARIABLE TO THE ONE WE ACTUALLY WANT TO PREDICT
-y_train<- Train$confirmed_cases
-y_test <- Test$confirmed_cases
+#y_train <- Train$cases
+#y_test <- Test$cases
 
 #HEEEEEEEEEEEEEEEEEEEEEEEEERE ALSO SELECT THE FEATURES THAT ACTUALLY WE WANT ;)
-x_train<- select(Train,-c(confirmed_cases,date,Country.Region) ) %>% as.matrix()
-x_test <- select(Test,-c(confirmed_cases,date,Country.Region)) %>% as.matrix()
+#x_train<- select(Train,-c(cases,Date)) %>% as.matrix()
+#x_test <- select(Test,-c(cases,Date)) %>% as.matrix()
 ```
 
+# predict 
 ```{r}
 
 #se crea un grid de lambas para hacer la busqueda de los hp adecuados
-lambdas <- 10^seq(3, -2, by = -.1)
+#lambdas <- 10^seq(3, -2, by = -.1)
 
-cv_fit <- cv.glmnet(x_train, y_train, alpha = 1, lambda = lambdas)
+#cv_fit <- cv.glmnet(x_train, y_train, alpha = 1, lambda = lambdas)
 
 #visualize the cv fit of the lasso regression
-plot(cv_fit)
-opt_lambda <- cv_fit$lambda.min
-opt_lambda # this optiman lambda minimize the error
+#plot(cv_fit)
+#opt_lambda <- cv_fit$lambda.min
+#opt_lambda # this optiman lambda minimize the error
 #fit <- cv_fit$glmnet.fit
 #summary(fit)
 
 ######################
-y_predicted <- predict(cv_fit, s = opt_lambda, newx = x_test)
-
+#y_predicted <- predict(cv_fit, s = opt_lambda, newx = x_test)
 
 ```
 
-
+# plot predictions
 ```{r}
 #i create a new var with the y train + y pred (it will only be display the predicted values)
-mexico_data$pred_vals <- c(y_train,as.vector(y_predicted))
+# mexico_data$predicted_cases <- c(y_train,as.vector(y_predicted))
 
-ggplot(mexico_data,aes(x=date)) +
-  geom_line(aes(y=pred_vals),col="red") +
-  geom_line(aes(y=confirmed_cases)) + #change this to the variable of interest 
-  geom_vline(xintercept = mexico_data$date[nrow(x_train)], color="red", 
-                 linetype="dashed")+
-  ylab("Cumulative death cases in México")+
-  ggtitle("LASSO regression using confirmed_cases as Y")
+#ggplot(mexico_data,aes(x=Date)) +
+#  geom_line(aes(y=predicted_cases, colour = "Predicted infected cases")) +
+#  geom_line(aes(y=cases, colour = "Real infected cases")) + #change this to the variable of interest 
+#  scale_colour_manual("", 
+#                      breaks = c("Predicted infected cases", "Real infected cases"),
+#                      values = c("red", "blue")) +
+#  geom_vline(xintercept = mexico_data$Date[nrow(x_train)], col="red", 
+#                 linetype="dashed") +
+#  ylab("Infected confirmed cases in México") +
+#  ggtitle("LASSO regression using confirmed_cases as Y")
 
 #metrics
-mae(actual =y_test ,predicted = y_predicted) 
-mse(actual =y_test ,predicted = y_predicted)
+#mae(actual =y_test ,predicted = y_predicted) 
+#mse(actual =y_test ,predicted = y_predicted)
 ```
 
-#ridge regression
+# ridge regression
 ```{r}
-cv_fit <- cv.glmnet(x_train, y_train, alpha = 0, lambda = lambdas)
+#cv_fit <- cv.glmnet(x_train, y_train, alpha = 0, lambda = lambdas)
 #visualize the cv fit of the lasso regression
-plot(cv_fit)
-opt_lambda <- cv_fit$lambda.min
-opt_lambda # this optiman lambda minimize the error
+#plot(cv_fit)
+#opt_lambda <- cv_fit$lambda.min
+#opt_lambda # this optiman lambda minimize the error
 #fit <- cv_fit$glmnet.fit
 #summary(fit)
 
 ######################
-y_predicted <- predict(cv_fit, s = opt_lambda, newx = x_test)
+#y_predicted <- predict(cv_fit, s = opt_lambda, newx = x_test)
 
-head(y_predicted)
-
-
+#head(y_predicted)
 ```
-
 
 # plot the results
 ```{r}
 #i create a new var with the y train + y pred (it will only be display the predicted values)
-mexico_data$pred_vals <- c(y_train,as.vector(y_predicted))
+#mexico_data$predicted_cases <- c(y_train,as.vector(y_predicted))
 
-ggplot(mexico_data,aes(x=date)) +
-  geom_line(aes(y=pred_vals),col="red") +
-  geom_line(aes(y=confirmed_cases)) + #change this to the variable of interest 
-  geom_vline(xintercept = mexico_data$date[nrow(x_train)], color="red", 
-                 linetype="dashed")+
-  ylab("Cumulative death cases in México")+
-  ggtitle("RIDGE regression using confirmed_cases as Y")
+#ggplot(mexico_data,aes(x=Date)) +
+#  geom_line(aes(y=predicted_cases),col="red") +
+#  geom_line(aes(y=cases)) + #change this to the variable of interest 
+#  geom_vline(xintercept = mexico_data$Date[nrow(x_train)], color="red", 
+#                 linetype="dashed")+
+#  ylab("Cumulative death cases in México")+
+#  ggtitle("RIDGE regression using confirmed_cases as Y")
   
-
-
 #metrics
-mae(actual =y_test ,predicted = y_predicted) 
-mse(actual =y_test ,predicted = y_predicted)
+#mae(actual =y_test ,predicted = y_predicted) 
+#mse(actual =y_test ,predicted = y_predicted)
 ```
-
